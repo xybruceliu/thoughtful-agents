@@ -1,159 +1,207 @@
 """Conversation module containing Conversation and Utterance classes."""
-from typing import Dict, List, Optional, Any
-from .agent import Agent
-from .utils.vector_store import VectorStore, StoredItem
+from typing import Dict, List, Optional, Any, Tuple
+import uuid
+import numpy as np
+from numpy.typing import NDArray
+from .utils import get_embedding, get_completion
+from .participant import Participant
 
 class Utterance:
-    """A single utterance in a conversation."""
+    """A single utterance in a conversation.
+    
+    Attributes:
+        id: Auto-generated unique identifier for the utterance (format: "utterance-{uuid}")
+        participant_id: ID of the participant who made the utterance
+        text: The text content of the utterance
+        embedding: Vector representation of the text as numpy array
+        weight: Importance score of the utterance predefined by user
+        turn_number: The turn number when this utterance was made
+        interpretation: Optional interpretation of the utterance
+        thought_id: Optional ID of the thought that generated this utterance
+    """
     
     def __init__(
         self,
-        id: str,
-        agent_id: str,
-        content: Dict[str, Any],
+        participant_id: str,
+        text: str,
+        embedding: NDArray[np.float32],
         turn_number: int,
-        interpretation: Optional[Dict] = None,
-        thought_id: Optional[str] = None
-    ):
+        weight: float = 1.0,
+        thought_id: Optional[str] = None,
+        interpretation: Optional[Dict[str, Any]] = None
+    ) -> None:
         """Initialize an utterance.
         
         Args:
-            id: Unique identifier for the utterance
-            agent_id: ID of the agent who made the utterance
-            content: Dictionary containing text and embedding
+            participant_id: ID of the participant who made the utterance
+            text: The text content of the utterance
+            embedding: Vector representation of the text
             turn_number: The turn number when this utterance was made
-            interpretation: Optional interpretation of the utterance
+            weight: Importance score predefined by user (default: 1.0)
             thought_id: Optional ID of the thought that generated this utterance
+            interpretation: Optional interpretation of the utterance
         """
-        self.id = id
-        self.agent_id = agent_id
-        self.content = content
+        self.id = f"utterance-{uuid.uuid4()}"
+        self.participant_id = participant_id
+        self.text = text
+        self.embedding = embedding
         self.turn_number = turn_number
-        self.interpretation = interpretation
+        self.weight = weight
         self.thought_id = thought_id
-        self.saliency = 1.0
-        self.last_accessed_turn = turn_number
-        self.retrieval_count = 0
+        self.interpretation = interpretation
+        
+    def __repr__(self) -> str:
+        """Return a string representation of the utterance for debugging."""
+        return f"Utterance(id='{self.id}', participant_id='{self.participant_id}', turn_number={self.turn_number}, text='{self.text[:30]}...')"
+
 
 class Conversation:
-    """Manages a conversation between multiple agents."""
+    """Manages a conversation between multiple participants (humans and AI agents).
     
-    def __init__(self, agents: List['Agent'], topic: str, embedding_dim: int = 1536):
-        """Initialize a conversation.
+    The conversation maintains an ordered list of utterances and provides
+    methods for adding new utterances and retrieving relevant context.
+    
+    Attributes:
+        participants: List of participating humans and AI agents
+        topic: Topic of the conversation
+        current_turn: Current turn number
+        utterances: List of all utterances in the conversation
+    """
+    
+    def __init__(
+        self, 
+        participants: List[Participant], 
+        topic: str
+    ) -> None:
+        """Initialize a conversation. Do not use directly, use create() instead.
         
         Args:
-            agents: List of participating agents
+            participants: List of participating humans and AI agents
             topic: Topic of the conversation
-            embedding_dim: Dimension of embeddings (default: 1536 for text-embedding-3-small)
         """
-        self.agents = agents
+        self.participants = participants
         self.topic = topic
         self.current_turn = 0
-        self.vector_store = VectorStore(embedding_dim)
+        self.utterances: List[Utterance] = []
         
-    def add_utterance(self, utterance: Utterance) -> None:
-        """Add a new utterance to the conversation.
-        
-        Args:
-            utterance: Utterance to add
-        """
-        self.current_turn += 1
-        utterance.turn_number = self.current_turn
-        
-        # Store in vector store
-        self.vector_store.add_item(
-            item_id=utterance.id,
-            embedding=utterance.content["embedding"],
-            content=utterance.content,
-            metadata={
-                "agent_id": utterance.agent_id,
-                "interpretation": utterance.interpretation,
-                "thought_id": utterance.thought_id,
-                "saliency": utterance.saliency,
-                "last_accessed_turn": utterance.last_accessed_turn,
-                "retrieval_count": utterance.retrieval_count
-            },
-            turn_number=utterance.turn_number
-        )
-        
-    def get_context(
-        self,
-        query_embedding: Optional[List[float]] = None,
-        window_size: Optional[int] = None,
-        min_similarity: float = 0.7,
-        top_k: int = 5
-    ) -> List[Utterance]:
-        """Get conversation context, optionally filtered by relevance to a query.
+    @classmethod
+    def create(
+        cls,
+        participants: List[Participant],
+        topic: str
+    ) -> "Conversation":
+        """Create a new conversation.
         
         Args:
-            query_embedding: Optional embedding to find relevant utterances
-            window_size: Optional number of most recent turns to include
-            min_similarity: Minimum similarity threshold for semantic search
-            top_k: Maximum number of results to return
+            participants: List of participating humans and AI agents
+            topic: Topic of the conversation
             
         Returns:
-            List of utterances in context window
+            Initialized Conversation instance
+            
+        Raises:
+            ValueError: If no participants provided or topic is empty
         """
-        # Calculate turn window if specified
-        turn_window = None
-        if window_size is not None:
-            start_turn = max(1, self.current_turn - window_size + 1)
-            turn_window = (start_turn, self.current_turn)
+        if not participants:
+            raise ValueError("At least one participant is required")
+        if not topic.strip():
+            raise ValueError("Topic cannot be empty")
             
-        if query_embedding is None:
-            # Return most recent utterances if no query
-            items = []
-            for idx, item in self.vector_store.stored_items.items():
-                if turn_window is None or (turn_window[0] <= item.turn_number <= turn_window[1]):
-                    items.append((item, 1.0))  # Default similarity of 1.0
-            items.sort(key=lambda x: x[0].turn_number, reverse=True)
-            items = items[:top_k]
-        else:
-            # Search by similarity
-            items = self.vector_store.search(
-                query_embedding=query_embedding,
-                k=top_k,
-                min_similarity=min_similarity,
-                turn_window=turn_window
-            )
-            
-        # Convert to Utterances
-        utterances = []
-        for item, similarity in items:
-            utterance = Utterance(
-                id=item.id,
-                agent_id=item.metadata["agent_id"],
-                content=item.content,
-                turn_number=item.turn_number,
-                interpretation=item.metadata["interpretation"],
-                thought_id=item.metadata["thought_id"]
-            )
-            utterance.saliency = item.metadata["saliency"] * similarity
-            utterance.last_accessed_turn = self.current_turn
-            utterance.retrieval_count = item.metadata["retrieval_count"] + 1
-            
-            # Update metadata
-            self.vector_store.update_metadata(item.id, {
-                "last_accessed_turn": utterance.last_accessed_turn,
-                "retrieval_count": utterance.retrieval_count,
-                "saliency": utterance.saliency
-            })
-            
-            utterances.append(utterance)
-            
-        return utterances
+        return cls(participants=participants, topic=topic)
         
-    def get_current_speaker(self) -> Optional['Agent']:
-        """Determine which agent currently has the conversation turn."""
-        if self.current_turn == 0:
-            return self.agents[0]  # First agent starts
+    def __repr__(self) -> str:
+        """Return a string representation of the conversation for debugging."""
+        participant_names = ', '.join(p.name for p in self.participants)
+        return f"Conversation(topic='{self.topic}', current_turn={self.current_turn}, participants=[{participant_names}])"
+        
+    async def add_utterance(self, participant_id: str, text: str, weight: float = 1.0) -> None:
+        """Add a new utterance to the conversation with interpretation.
+        
+        Args:
+            participant_id: ID of the participant who made the utterance
+            text: The text content of the utterance
+            weight: Importance score predefined by user (default: 1.0)
             
-        # Get last speaker from vector store
-        items = list(self.vector_store.stored_items.values())
-        if not items:
-            return self.agents[0]
+        Raises:
+            ValueError: If text is empty
+        """
+        if not text.strip():
+            raise ValueError("Empty text provided for utterance")
             
-        last_speaker_id = max(items, key=lambda x: x.turn_number).metadata["agent_id"]
-        current_idx = (next(i for i, a in enumerate(self.agents) if a.id == last_speaker_id) + 1) % len(self.agents)
-        return self.agents[current_idx]
+        self.current_turn += 1
+        
+        # Generate embedding from text
+        embedding_list = await get_embedding(text)
+        embedding = np.array(embedding_list, dtype=np.float32)
+        
+        # Create utterance
+        utterance = Utterance(
+            participant_id=participant_id,
+            text=text,
+            embedding=embedding,
+            turn_number=self.current_turn,
+            weight=weight
+        )
+        
+        # Generate interpretation
+        interpretation = await self.interpret_utterance(utterance)
+        utterance.interpretation = interpretation
+        
+        # Add to conversation
+        self.utterances.append(utterance)
+        
+    async def interpret_utterance(self, utterance: Utterance, last_n: int = 10) -> Dict[str, Any]:
+        """Interpret the utterance in the context of the conversation.
+        
+        Args:
+            utterance: The utterance to interpret
+            last_n: Number of recent utterances to consider for context
+            
+        Returns:
+            Dictionary containing interpretation text and embedding
+        """
+        # Create prompts for interpretation
+        system_prompt, user_prompt = self.create_prompt_interpretation(utterance, last_n)
+        
+        # Call GPT for interpretation
+        interpretation_text = await get_completion(system_prompt, user_prompt)
+        interpretation_embedding = await get_embedding(interpretation_text['text'])
+        
+        return {
+            "text": interpretation_text['text'],
+            "embedding": interpretation_embedding
+        }
+        
+    def create_prompt_interpretation(self, utterance: Utterance, last_n: int) -> Tuple[str, str]:
+        """Create a prompt for GPT to interpret the utterance.
+        
+        Args:
+            utterance: The utterance to interpret
+            last_n: Number of recent utterances to consider for context
+            
+        Returns:
+            Tuple containing system and user prompts
+        """
+        participant_name = next((p.name for p in self.participants if p.id == utterance.participant_id), "Unknown")
+        recent_utterances = self.retrieve(last_n)
+        conversation_context = "\n".join(f"{u.participant_id}: {u.text}" for u in recent_utterances)
+        
+        system_prompt = f"You are playing a role as a participant in a conversation. Your name in the conversation is {participant_name}.\n" \
+                        f"Given the last few lines of the conversation:\n{conversation_context}\n" \
+                        f"Interpret what {participant_name} just said in the context of the conversation and what {participant_name} might be thinking. Be as succinct as possible and use a single sentence."
+        
+        user_prompt = f"Utterance: {participant_name}: {utterance.text}\nInterpretation: "
+        
+        return system_prompt, user_prompt
+        
+    def retrieve(self, last_n_turns: int = 20) -> List[Utterance]:
+        """Retrieve the last n turns of conversation.
+        
+        Args:
+            last_n_turns: Number of turns to retrieve
+            
+        Returns:      
+            List of utterances from the last n turns
+        """
+        return self.utterances[-last_n_turns:]
         

@@ -13,12 +13,19 @@ class LLMAPIError(Exception):
     """Custom exception for LLM API errors."""
     pass
 
-# Initialize OpenAI client
-# To set OPENAI_API_KEY, run `export OPENAI_API_KEY=<your_api_key>` in the terminal
-api_key = os.getenv("OPENAI_API_KEY")
-if not api_key:
-    raise LLMAPIError("OPENAI_API_KEY environment variable not set")
-client = OpenAI(api_key=api_key)
+def get_client() -> OpenAI:
+    """Get OpenAI client with API key validation.
+    
+    Returns:
+        OpenAI client instance
+        
+    Raises:
+        LLMAPIError: If OPENAI_API_KEY is not set
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise LLMAPIError("OPENAI_API_KEY environment variable not set")
+    return OpenAI(api_key=api_key)
 
 async def get_completion(
     system_prompt: str,
@@ -52,6 +59,7 @@ async def get_completion(
     Raises:
         LLMAPIError: If API call fails after retries or other errors occur
     """
+    client = get_client()
     for attempt in range(max_retries):
         try:
             completion_args = {
@@ -113,9 +121,10 @@ async def get_embedding(
     if not text.strip():
         raise ValueError("Empty text provided for embedding")
         
+    client = get_client()
     for attempt in range(max_retries):
         try:
-            response = await client.embeddings.create(
+            response = client.embeddings.create(
                 model=model,
                 input=text
             )

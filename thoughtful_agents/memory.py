@@ -1,132 +1,109 @@
 """Memory module containing MemoryItem and MemoryStore classes."""
-from typing import Dict, List, Optional, Any, Tuple
-from .utils.vector_store import VectorStore, StoredItem
+from typing import List, Optional, Dict, Any
+import uuid
+import numpy as np
+from numpy.typing import NDArray
+from .utils import get_embedding
 
 class MemoryItem:
-    """A single memory item that can be stored and retrieved."""
+    """A single memory item.
+    
+    Attributes:
+        id: Auto-generated unique identifier for the memory (format: "memory-{uuid}")
+        agent_id: ID of the agent who owns this memory
+        text: The text content of the memory
+        embedding: Vector representation of the text as numpy array (generated from text)
+        weight: Importance score of the memory predefined by user
+        memory_type: Type of memory ("working" or "long_term")
+        turn_number: Turn number when this memory was created
+        saliency: Importance score of the memory
+        last_accessed_turn: Last turn number when this memory was retrieved
+        retrieval_count: Number of times this memory has been retrieved
+    """
     
     def __init__(
         self,
-        id: str,
-        content: Dict[str, Any],
-        weight: float = 1.0,
-        memory_type: str = "working",
+        agent_id: str,
+        text: str,
+        weight: float,
+        embedding: NDArray[np.float32],
+        memory_type: str = "long_term",
         turn_number: int = 0
-    ):
+    ) -> None:
         """Initialize a memory item.
         
         Args:
-            id: Unique identifier for the memory
-            content: Dictionary containing text and embedding
-            weight: Predefined importance weight
+            agent_id: ID of the agent who owns this memory
+            text: The text content of the memory
+            weight: Importance score predefined by user
+            embedding: Vector representation of the text
             memory_type: Type of memory ("working" or "long_term")
             turn_number: Turn number when this memory was created
         """
-        self.id = id
-        self.content = content
+        self.id = f"memory-{uuid.uuid4()}"
+        self.agent_id = agent_id
         self.weight = weight
-        self.memory_type = memory_type
+        self.text = text
+        self.embedding = embedding
         self.turn_number = turn_number
-        self.saliency = 1.0
+        self.memory_type = memory_type
+
+        # Tracking metrics
+        self.saliency = 1.0  # default saliency
         self.last_accessed_turn = turn_number
         self.retrieval_count = 0
 
 class MemoryStore:
-    """Manages storage and retrieval of memories using FAISS."""
+    """Manages storage and retrieval of memories.
     
-    def __init__(self, embedding_dim: int = 1536):  # Default for text-embedding-3-small
-        """Initialize memory store with vector stores for each memory type.
+    Maintains separate lists for working and long-term memories,
+    with methods for adding, retrieving, and searching memories.
+    
+    Attributes:
+        working_memory: List of working (temporary) memories
+        long_term_memory: List of long-term (permanent) memories
+    """
+    
+    def __init__(self) -> None:
+        """Initialize memory store."""
+        self.working_memory: List[MemoryItem] = []
+        self.long_term_memory: List[MemoryItem] = []
+        
+    async def add_memory(self, agent_id: str, text: str, weight: float = 1.0, memory_type: str = "long_term", turn_number: int = 0) -> None:
+        """Add a new memory item with generated embedding.
         
         Args:
-            embedding_dim: Dimension of embeddings (default: 1536 for text-embedding-3-small)
+            agent_id: ID of the agent who owns this memory
+            text: The text content of the memory
+            weight: Importance score predefined by user
+            memory_type: Type of memory ("working" or "long_term")
+            turn_number: Turn number when this memory was created
+            
+        Raises:
+            ValueError: If text is empty
+            LLMAPIError: If embedding generation fails
         """
-        self.working_memory = VectorStore(embedding_dim)
-        self.long_term_memory = VectorStore(embedding_dim)
+        if not text.strip():
+            raise ValueError("Empty text provided for memory")
+            
+        # Generate embedding from text
+        embedding_list = await get_embedding(text)
+        embedding = np.array(embedding_list, dtype=np.float32)
         
-    def add(self, memory_item: MemoryItem) -> None:
-        """Add a memory item to the appropriate store.
-        
-        Args:
-            memory_item: Memory item to add
-        """
-        store = self.working_memory if memory_item.memory_type == "working" else self.long_term_memory
-        
-        store.add_item(
-            item_id=memory_item.id,
-            embedding=memory_item.content["embedding"],
-            content=memory_item.content,
-            metadata={
-                "weight": memory_item.weight,
-                "saliency": memory_item.saliency,
-                "last_accessed_turn": memory_item.last_accessed_turn,
-                "retrieval_count": memory_item.retrieval_count
-            },
-            turn_number=memory_item.turn_number
+        # Create memory item
+        memory = MemoryItem(
+            agent_id=agent_id,
+            text=text,
+            weight=weight,
+            embedding=embedding,
+            memory_type=memory_type,
+            turn_number=turn_number
         )
         
-    def retrieve(
-        self,
-        query_embedding: List[float],
-        threshold: float = 0.7,
-        memory_type: Optional[str] = None,
-        turn_window: Optional[Tuple[int, int]] = None,
-        top_k: int = 5
-    ) -> List[MemoryItem]:
-        """Retrieve relevant memories based on embedding similarity.
-        
-        Args:
-            query_embedding: Embedding vector to search with
-            threshold: Minimum similarity threshold
-            memory_type: Optional type to filter by ("working" or "long_term")
-            turn_window: Optional (start_turn, end_turn) to filter results
-            top_k: Maximum number of results to return
-            
-        Returns:
-            List of relevant memory items
-        """
-        results = []
-        
-        # Search appropriate stores
-        stores = []
-        if memory_type == "working" or memory_type is None:
-            stores.append(self.working_memory)
-        if memory_type == "long_term" or memory_type is None:
-            stores.append(self.long_term_memory)
-            
-        # Collect results from each store
-        for store in stores:
-            items = store.search(
-                query_embedding=query_embedding,
-                k=top_k,
-                min_similarity=threshold,
-                turn_window=turn_window
-            )
-            
-            # Convert StoredItems back to MemoryItems
-            for item, similarity in items:
-                memory = MemoryItem(
-                    id=item.id,
-                    content=item.content,
-                    weight=item.metadata["weight"],
-                    memory_type="working" if store == self.working_memory else "long_term",
-                    turn_number=item.turn_number
-                )
-                memory.saliency = item.metadata["saliency"] * similarity  # Adjust saliency by similarity
-                memory.last_accessed_turn = item.metadata["last_accessed_turn"]
-                memory.retrieval_count = item.metadata["retrieval_count"] + 1
-                
-                # Update metadata in store
-                store.update_metadata(item.id, {
-                    "retrieval_count": memory.retrieval_count,
-                    "saliency": memory.saliency
-                })
-                
-                results.append(memory)
-        
-        # Sort by saliency and return top_k
-        results.sort(key=lambda x: x.saliency, reverse=True)
-        return results[:top_k]
-        
-    def update_saliency(self, memory_id: str) -> None:
-        """Update saliency and access time for a memory item."""
-        pass 
+        # Add to appropriate memory store
+        if memory.memory_type == "working":
+            self.working_memory.append(memory)
+        else:
+            self.long_term_memory.append(memory)
+
+    # TODO: Implement retrieval methods

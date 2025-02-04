@@ -9,8 +9,7 @@ from .conversation import Conversation, Utterance
 from .memory import MemoryItem, MemoryStore
 from .thought import Thought, ThoughtReservoir
 from .utils.llm_api import get_completion, get_embedding, LLMAPIError
-from .utils.vector_store import VectorStore, StoredItem
-from .utils.text_splitter import RecursiveCharacterTextSplitter
+from .utils.text_splitter import SentenceTextSplitter
 
 __all__ = [
     # Core classes
@@ -26,7 +25,5 @@ __all__ = [
     'get_completion',
     'get_embedding',
     'LLMAPIError',
-    'VectorStore',
-    'StoredItem',
-    'RecursiveCharacterTextSplitter'
+    'SentenceTextSplitter'
 ] 
